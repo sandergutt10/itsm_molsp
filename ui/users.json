@@ -1,0 +1,17 @@
+{
+  "admin": {
+    "password": "admin123",
+    "role": "admin",
+    "name": "Администратор"
+  },
+  "engineer": {
+    "password": "eng123",
+    "role": "engineer",
+    "name": "Инженер поддержки"
+  },
+  "student": {
+    "password": "student123",
+    "role": "student",
+    "name": "Студент-заочник"
+  }
+}

@@ -13,10 +13,17 @@ Streamlit UI для лабораторной работы 3.
 import streamlit as st
 import httpx
 import json
+import os
+
+# Новые импорты для экспорта
+from export_utils import export_excel, export_pdf
+from gantt_utils import build_gantt, build_gantt_summary
+from auth import init_auth_state, require_auth, render_user_header, logout, has_role
+
+
 
 # Адреса сервисов
 # В Docker — имена контейнеров; локально — localhost
-import os
 ITSM_URL = os.environ.get("ITSM_URL", "http://localhost:8001")
 RAG_URL = os.environ.get("RAG_URL", "http://localhost:8002")
 ORCH_URL = os.environ.get("ORCH_URL", "http://localhost:8003")
@@ -53,15 +60,9 @@ def call_rag(query, category=None, k=3):
 
 
 def call_itsm_create(title, description, priority):
-    """Создание заявки в ITSM."""
     resp = httpx.post(
         f"{ITSM_URL}/tickets",
-        json={
-            "title": title,
-            "description": description,
-            "priority": priority,
-            "type": "incident",
-        },
+        json={"title": title, "description": description, "priority": priority, "type": "incident"},
         timeout=10,
     )
     return resp.json()
@@ -108,11 +109,17 @@ def call_pipeline(query, category=None, auto_create=True):
     resp = httpx.post(f"{ORCH_URL}/pipeline", json=payload, timeout=60)
     return resp.json()
 
+# ========================
+# Точка входа
+# ========================
 
-# --- Интерфейс ---
+init_auth_state()
 
-st.title("🛠️ ITSM: RAG + Заявки + MOLSP")
-st.caption("Лабораторная работа 3: сквозной сценарий")
+if not require_auth():
+    st.stop()
+
+# Шапка с пользователем
+render_user_header()
 
 # Проверка сервисов
 health = check_health()
@@ -126,7 +133,7 @@ for i, (name, ok) in enumerate(health.items()):
 
 st.divider()
 
-# --- Вкладки ---
+# Вкладки
 tab1, tab2, tab3, tab4 = st.tabs([
     "🔄 Сквозной сценарий",
     "🔍 RAG-бот",
@@ -134,17 +141,20 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📅 Расписание MOLSP",
 ])
 
+
 # ========================
 # Вкладка 1: Сквозной сценарий
 # ========================
 with tab1:
     st.header("Сквозной сценарий: вопрос → RAG → заявка → расписание")
 
+    # Только admin и engineer могут запускать сквозной сценарий
+    can_execute = has_role("admin", "engineer")
+
     with st.form("pipeline_form"):
         query = st.text_input(
             "Вопрос пользователя:",
             value="Сервер не отвечает, нужно срочно восстановить",
-            help="Введите вопрос или описание проблемы",
         )
         col_a, col_b = st.columns(2)
         with col_a:
@@ -152,15 +162,18 @@ with tab1:
                 "Категория (опционально)",
                 ["", "Swarm Robotics", "Robot Interaction", "Mechatronics",
                  "Incident Management", "Problem Management", "Change Enablement"],
-                help="Фильтр по категории базы знаний",
             )
         with col_b:
-            auto_create = st.checkbox("Автосоздание заявки", value=True,
-                help="Если RAG не нашёл ответ — создать заявку автоматически")
+            auto_create = st.checkbox("Автосоздание заявки", value=True)
 
-        submitted = st.form_submit_button("🚀 Запустить сценарий")
+        if can_execute:
+            submitted = st.form_submit_button("🚀 Запустить сценарий")
+        else:
+            submitted = st.form_submit_button("🚀 Запустить (только просмотр)", disabled=True)
+            if not can_execute:
+                st.info("💡 Только инженеры и админы могут создавать заявки. Войдите как engineer или admin.")
 
-    if submitted:
+    if submitted and can_execute:
         with st.spinner("Выполняется сквозной сценарий..."):
             try:
                 result = call_pipeline(
@@ -174,9 +187,11 @@ with tab1:
                 rag = result.get("step_1_rag", {})
                 sources = rag.get("sources", [])
                 answer = rag.get("answer", "")
+                answer_source = rag.get("answer_source", "template")
 
-                st.write("**Ответ RAG:**")
-                st.text_area("Answer", value=answer, height=150, key="rag_answer")
+                source_badge = "🤖 LLM" if answer_source == "llm" else "📝 Шаблон"
+                st.write(f"**Источник ответа:** {source_badge}")
+                st.text_area("Ответ RAG", value=answer, height=150, key="rag_answer")
 
                 if sources:
                     st.write("**Найденные источники:**")
@@ -193,7 +208,7 @@ with tab1:
                 if ticket.get("id"):
                     st.success(f"Создана заявка: **{ticket['id']}** (статус: {ticket.get('status', '?')})")
                 else:
-                    st.info("Заявка не создана (автосоздание отключено или RAG нашёл ответ)")
+                    st.info("Заявка не создана")
 
                 st.divider()
 
@@ -205,7 +220,6 @@ with tab1:
 
                 tickets_list = tickets_info.get("tickets", [])
                 if tickets_list:
-                    # Таблица
                     st.dataframe(
                         data=[
                             {"ID": t["id"], "Заголовок": t["title"],
@@ -229,6 +243,11 @@ with tab1:
                 with col3:
                     st.metric("Не назначено", len(schedule.get("unassigned", [])))
 
+                # Диаграмма Ганта
+                st.write("**Диаграмма Ганта:**")
+                fig = build_gantt(schedule)
+                st.plotly_chart(fig, use_container_width=True)
+
                 # Таблица назначений
                 assignments = schedule.get("assignments", [])
                 if assignments:
@@ -248,7 +267,6 @@ with tab1:
                         use_container_width=True,
                     )
 
-                # Текст расписания
                 schedule_text = result.get("schedule_text", "")
                 if schedule_text:
                     with st.expander("Текст расписания", expanded=False):
@@ -256,6 +274,7 @@ with tab1:
 
             except Exception as e:
                 st.error(f"Ошибка: {e}")
+
 
 # ========================
 # Вкладка 2: RAG-бот
@@ -280,6 +299,11 @@ with tab2:
             try:
                 result = call_rag(rag_query, category=rag_cat or None, k=rag_k)
 
+                # Показываем источник ответа
+                answer_source = result.get("answer_source", "template")
+                source_badge = "🤖 LLM" if answer_source == "llm" else "📝 Шаблон"
+                st.write(f"**Источник ответа:** {source_badge}")
+
                 st.subheader("Ответ")
                 st.write(result.get("answer", ""))
 
@@ -294,6 +318,7 @@ with tab2:
             except Exception as e:
                 st.error(f"Ошибка: {e}")
 
+
 # ========================
 # Вкладка 3: Заявки и метрики
 # ========================
@@ -303,13 +328,19 @@ with tab3:
     # Управление
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🎲 Создать 10 случайных заявок"):
-            result = call_itsm_simulate(10)
-            st.success(f"Создано: {result.get('created', 0)} заявок")
+        if has_role("admin", "engineer"):
+            if st.button("🎲 Создать 10 случайных заявок"):
+                result = call_itsm_simulate(10)
+                st.success(f"Создано: {result.get('created', 0)} заявок")
+        else:
+            st.button("🎲 Создать заявки", disabled=True, help="Только инженеры и админы")
     with col2:
-        if st.button("⏭ Продвинуть статусы"):
-            result = call_itsm_tick()
-            st.info(f"Продвинуто: {result.get('advanced', 0)}, SLA нарушено: {result.get('sla_breached_now', 0)}")
+        if has_role("admin", "engineer"):
+            if st.button("⏭ Продвинуть статусы"):
+                result = call_itsm_tick()
+                st.info(f"Продвинуто: {result.get('advanced', 0)}, SLA нарушено: {result.get('sla_breached_now', 0)}")
+        else:
+            st.button("⏭ Продвинуть", disabled=True, help="Только инженеры и админы")
     with col3:
         if st.button("🔄 Обновить"):
             st.rerun()
@@ -344,9 +375,9 @@ with tab3:
                 use_container_width=True,
             )
         else:
-            st.info("Заявок нет. Создайте через кнопку выше или через сквозной сценарий.")
+            st.info("Заявок нет.")
     except Exception as e:
-        st.error(f"Ошибка получения заявок: {e}")
+        st.error(f"Ошибка: {e}")
 
     st.divider()
 
@@ -380,85 +411,150 @@ with tab3:
                 use_container_width=True,
             )
     except Exception as e:
-        st.error(f"Ошибка получения метрик: {e}")
+        st.error(f"Ошибка: {e}")
+
 
 # ========================
 # Вкладка 4: Расписание MOLSP
 # ========================
 with tab4:
     st.header("📅 Расписание MOLSP")
-
     st.write("Планировщик берёт все открытые заявки из ITSM и распределяет их между инженерами по слотам дня.")
 
-    if st.button("🚀 Запустить планировщик", type="primary"):
+    col_btn1, col_btn2 = st.columns([1, 1])
+    with col_btn1:
+        run_scheduler = st.button("🚀 Запустить планировщик", type="primary")
+    with col_btn2:
+        st.write("")  # пусто для выравнивания
+
+    if run_scheduler:
         with st.spinner("Решение задачи MOLSP..."):
             try:
                 data = call_schedule()
-
-                # Сводка
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Статус", data.get("status", "?"))
-                with col2:
-                    st.metric("Назначено", data.get("assigned", 0))
-                with col3:
-                    st.metric("Не назначено", len(data.get("unassigned", [])))
-                with col4:
-                    st.metric("Макс. загрузка", f"{data.get('max_load', 0)} слотов")
-
-                
-                # Загрузка инженеров
-                st.subheader("Загрузка инженеров")
-                loads = data.get("loads", {})
-
-                if loads:
-                    import pandas as pd
-
-                    df_loads = pd.DataFrame({
-                        "Инженер": list(loads.keys()),
-                        "Слоты": list(loads.values()),
-                    })
-
-                    st.bar_chart(
-                        data=df_loads,
-                        x="Инженер",
-                        y="Слоты",
-                        use_container_width=True,
-                    )
-
-                    for eng, load in loads.items():
-                        st.write(f"**{eng}**: {load} слотов")
-
-
-                # Назначения
-                st.subheader("Назначения")
-                assignments = data.get("assignments", [])
-                if assignments:
-                    st.dataframe(
-                        data=[
-                            {
-                                "Слот": f"Час {a['slot']+1}",
-                                "Инженер": a["engineer"],
-                                "Заявка": a["task_id"],
-                                "Приоритет": a["priority"],
-                                "Заголовок": a["title"][:60],
-                                "SLA": "✅" if a["sla_ok"] else "⚠",
-                            }
-                            for a in sorted(assignments, key=lambda x: (x["slot"], x["engineer"]))
-                        ],
-                        use_container_width=True,
-                    )
-
-                # Не назначенные
-                unassigned = data.get("unassigned", [])
-                if unassigned:
-                    st.warning(f"Не назначено: {', '.join(unassigned)}")
-
-                # Текст расписания
-                text = data.get("schedule_text", "")
-                if text:
-                    with st.expander("Полное расписание (текст)", expanded=True):
-                        st.code(text, language="text")
-
+                st.session_state["last_schedule"] = data
             except Exception as e:
                 st.error(f"Ошибка: {e}")
+                st.session_state["last_schedule"] = None
+
+    if "last_schedule" in st.session_state and st.session_state["last_schedule"]:
+        data = st.session_state["last_schedule"]
+
+        # --- Экспорт ---
+        st.divider()
+        st.subheader("📥 Экспорт расписания")
+        col_exp1, col_exp2, col_exp3 = st.columns(3)
+        with col_exp1:
+            if st.button("📊 Скачать Excel"):
+                xlsx_bytes = export_excel(data)
+                st.download_button(
+                    label="💾 Сохранить .xlsx",
+                    data=xlsx_bytes,
+                    file_name=f"schedule_{data.get('status','unknown')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        with col_exp2:
+            if st.button("📄 Скачать PDF"):
+                pdf_bytes = export_pdf(data)
+                st.download_button(
+                    label="💾 Сохранить .pdf",
+                    data=pdf_bytes,
+                    file_name=f"schedule_{data.get('status','unknown')}.pdf",
+                    mime="application/pdf",
+                )
+        with col_exp3:
+            if st.button("📋 Скачать JSON"):
+                st.download_button(
+                    label="💾 Сохранить .json",
+                    data=json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"),
+                    file_name=f"schedule_{data.get('status','unknown')}.json",
+                    mime="application/json",
+                )
+        st.divider()
+
+        # Сводка
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Статус", data.get("status", "?"))
+        with col2:
+            st.metric("Назначено", data.get("assigned", 0))
+        with col3:
+            st.metric("Не назначено", len(data.get("unassigned", [])))
+        with col4:
+            st.metric("Макс. загрузка", f"{data.get('max_load', 0)} слотов")
+
+        # --- Диаграмма Ганта ---
+        st.subheader("📊 Диаграмма Ганта")
+        fig = build_gantt(data)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Сводка под диаграммой
+        gantt_summary = build_gantt_summary(data)
+        col_g1, col_g2, col_g3 = st.columns(3)
+        with col_g1:
+            st.write("**По приоритетам:**")
+            for p, count in gantt_summary["by_priority"].items():
+                st.write(f"  {p}: {count}")
+        with col_g2:
+            st.write("**SLA:**")
+            st.write(f"  ✅ OK: {gantt_summary['sla_ok']}")
+            st.write(f"  ⚠ Нарушено: {gantt_summary['sla_violated']}")
+        with col_g3:
+            st.write("**Утилизация:**")
+            for eng, util in gantt_summary["utilization"].items():
+                st.write(f"  {eng}: {util}")
+
+        # Загрузка инженеров
+        st.subheader("Загрузка инженеров")
+        loads = data.get("loads", {})
+
+        if loads:
+            import pandas as pd
+
+            df_loads = pd.DataFrame({
+                "Инженер": list(loads.keys()),
+                "Слоты": list(loads.values()),
+            })
+
+            st.bar_chart(
+                data=df_loads,
+                x="Инженер",
+                y="Слоты",
+                use_container_width=True,
+            )
+
+            for eng, load in loads.items():
+                st.write(f"**{eng}**: {load} слотов")
+
+
+        # Назначения
+        st.subheader("Назначения")
+        assignments = data.get("assignments", [])
+        if assignments:
+            st.dataframe(
+                data=[
+                    {
+                        "Слот": f"Час {a['slot']+1}",
+                        "Инженер": a["engineer"],
+                        "Заявка": a["task_id"],
+                        "Приоритет": a["priority"],
+                        "Заголовок": a["title"][:60],
+                        "SLA": "✅" if a["sla_ok"] else "⚠",
+                    }
+                    for a in sorted(assignments, key=lambda x: (x["slot"], x["engineer"]))
+                ],
+                use_container_width=True,
+            )
+
+        # Не назначенные
+        unassigned = data.get("unassigned", [])
+        if unassigned:
+            st.warning(f"Не назначено: {', '.join(unassigned)}")
+
+        # Текст расписания
+        text = data.get("schedule_text", "")
+        if text:
+            with st.expander("Полное расписание (текст)", expanded=False):
+                st.code(text, language="text")
+    elif run_scheduler:
+        st.info("Нет открытых заявок для планирования.")
+
