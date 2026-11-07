@@ -1,0 +1,51 @@
+services:
+  # Сервис 1: ITSM-симулятор
+  itsm:
+    build: ./itsm
+    ports:
+      - "8001:8000"
+    volumes:
+      - itsm_data:/app/data
+    restart: unless-stopped
+
+  # Сервис 2: RAG по робототехнике
+  rag-robotics:
+    build: ./rag
+    ports:
+      - "8002:8000"
+    volumes:
+      - ./rag/kb_robotics:/app/kb_robotics
+      - chroma_robotics:/app/chroma_robotics
+    restart: unless-stopped
+
+  # Сервис 3: Оркестратор (RAG + ITSM + MOLSP)
+  orchestrator:
+    build: ./orchestrator
+    ports:
+      - "8003:8000"
+    depends_on:
+      - itsm
+      - rag-robotics
+    environment:
+      - RAG_URL=http://rag-robotics:8000
+      - ITSM_URL=http://itsm:8000
+    restart: unless-stopped
+
+  # Сервис 4: Streamlit UI
+  ui:
+    build: ./ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - orchestrator
+      - itsm
+      - rag-robotics
+    environment:
+      - ITSM_URL=http://itsm:8000
+      - RAG_URL=http://rag-robotics:8000
+      - ORCH_URL=http://orchestrator:8000
+    restart: unless-stopped
+
+volumes:
+  itsm_data:
+  chroma_robotics:
